@@ -171,12 +171,25 @@ def get_back_keyboard():
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
 
-def get_collections_keyboard():
-    keyboard = [
-        [KeyboardButton("➕ Создать подборку")],
-        [KeyboardButton("📋 Мои подборки")],
-        [KeyboardButton("⬅️ Назад в меню")]
-    ]
+def get_collections_keyboard(user_id=None):
+    """Клавиатура для управления подборками"""
+    if user_id:
+        collections = get_user_collections(user_id)
+        keyboard = []
+
+        for collection_id, collection_data in collections.items():
+            movie_count = len(collection_data['movies'])
+            keyboard.append([KeyboardButton(f"📁 {collection_data['name']} ({movie_count})")])
+
+        keyboard.append([KeyboardButton("➕ Создать подборку")])
+        keyboard.append([KeyboardButton("⬅️ Назад в меню")])
+    else:
+        keyboard = [
+            [KeyboardButton("➕ Создать подборку")],
+            [KeyboardButton("📋 Мои подборки")],
+            [KeyboardButton("⬅️ Назад в меню")]
+        ]
+
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
 
@@ -213,12 +226,39 @@ def get_collections_choice_keyboard(user_id, movie_id):
     for collection_id, collection_data in collections.items():
         keyboard.append([
             InlineKeyboardButton(
-                collection_data['name'],
-                callback_data=f"add_to_collection_{collection_id}_{movie_id}"
+                f"📁 {collection_data['name']}",
+                callback_data=f"add_collection_{collection_id}_{movie_id}"
             )
         ])
 
     keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="cancel_collection")])
+    return InlineKeyboardMarkup(keyboard)
+
+
+def get_collection_movies_keyboard(collection_id, current_index, total_items, current_movie_id=None):
+    """Создает клавиатуру для навигации по фильмам в подборке"""
+    keyboard = []
+
+    # Кнопки навигации
+    nav_buttons = []
+    if current_index > 0:
+        nav_buttons.append(
+            InlineKeyboardButton("⬅️ Назад", callback_data=f"nav_collection_{collection_id}_{current_index - 1}"))
+
+    nav_buttons.append(InlineKeyboardButton(f"{current_index + 1}/{total_items}", callback_data="page_info"))
+
+    if current_index < total_items - 1:
+        nav_buttons.append(
+            InlineKeyboardButton("Дальше ➡️", callback_data=f"nav_collection_{collection_id}_{current_index + 1}"))
+
+    if nav_buttons:
+        keyboard.append(nav_buttons)
+
+    # Кнопка удаления из подборки
+    if current_movie_id:
+        keyboard.append([InlineKeyboardButton("❌ Удалить из подборки",
+                                              callback_data=f"remove_from_collection_{collection_id}_{current_movie_id}")])
+
     return InlineKeyboardMarkup(keyboard)
 
 
@@ -528,13 +568,15 @@ async def send_content(update, content, user_id, is_series=False, navigation_dat
 
     if navigation_data:
         # Если есть данные для навигации, используем навигационную клавиатуру
-        current_index, total_items, nav_type = navigation_data
+        current_index, total_items, nav_type, extra_data = navigation_data
 
         if nav_type == "random":
             keyboard = get_random_navigation_keyboard(current_index, total_items, content['id'], user_id, is_series,
                                                       search_type)
         elif nav_type in ["favorites", "watchlist"]:
             keyboard = get_list_navigation_keyboard(current_index, total_items, nav_type, content['id'])
+        elif nav_type == "collection":
+            keyboard = get_collection_movies_keyboard(extra_data, current_index, total_items, content['id'])
         else:
             keyboard = get_search_navigation_keyboard(current_index, total_items, content['id'], user_id, is_series,
                                                       search_type)
@@ -642,7 +684,7 @@ async def show_random_movie(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     context.user_data['random_movie_index'] = index
 
     # Отправляем с навигацией
-    navigation_data = (index, len(random_movies), "random")
+    navigation_data = (index, len(random_movies), "random", None)
     await send_content(update, movie, update.effective_user.id, is_series=False,
                        navigation_data=navigation_data, search_type="movie")
 
@@ -706,7 +748,7 @@ async def show_random_series(update: Update, context: ContextTypes.DEFAULT_TYPE,
     context.user_data['random_series_index'] = index
 
     # Отправляем с навигацией
-    navigation_data = (index, len(random_series_list), "random")
+    navigation_data = (index, len(random_series_list), "random", None)
     await send_content(update, series, update.effective_user.id, is_series=True,
                        navigation_data=navigation_data, search_type="series")
 
@@ -800,7 +842,7 @@ async def show_search_result(update: Update, context: ContextTypes.DEFAULT_TYPE,
     is_series = content.get('type') == 'tv-series'
 
     # Отправляем с навигацией
-    navigation_data = (index, len(search_results), "search")
+    navigation_data = (index, len(search_results), "search", None)
     await send_content(update, content, user_id, is_series, navigation_data, search_type="search")
 
 
@@ -882,7 +924,7 @@ async def show_actor_result(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     is_series = content.get('type') == 'tv-series'
 
     # Отправляем с навигацией
-    navigation_data = (index, len(actor_results), "search")
+    navigation_data = (index, len(actor_results), "search", None)
     await send_content(update, content, user_id, is_series, navigation_data, search_type="actor")
 
 
@@ -1040,17 +1082,18 @@ async def show_filter_result(update: Update, context: ContextTypes.DEFAULT_TYPE,
     is_series = content.get('type') == 'tv-series'
 
     # Отправляем с навигацией
-    navigation_data = (index, len(filter_results), "search")
+    navigation_data = (index, len(filter_results), "search", None)
     await send_content(update, content, user_id, is_series, navigation_data, search_type="filter")
 
 
 # Функции для работы с подборками
 async def show_collections(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Показывает меню подборок"""
+    user_id = update.effective_user.id
     await update.message.reply_text(
         "📚 <b>Мои подборки</b>\n\n"
         "Здесь вы можете создавать свои собственные подборки фильмов и сериалов.",
-        reply_markup=get_collections_keyboard(),
+        reply_markup=get_collections_keyboard(user_id),
         parse_mode='HTML'
     )
 
@@ -1073,7 +1116,8 @@ async def handle_collection_name(update: Update, context: ContextTypes.DEFAULT_T
     user_id = update.effective_user.id
 
     if not collection_name:
-        await update.message.reply_text("❌ Название не может быть пустым.", reply_markup=get_collections_keyboard())
+        await update.message.reply_text("❌ Название не может быть пустым.",
+                                        reply_markup=get_collections_keyboard(user_id))
         return
 
     # Создаем подборку
@@ -1081,7 +1125,7 @@ async def handle_collection_name(update: Update, context: ContextTypes.DEFAULT_T
 
     await update.message.reply_text(
         f"✅ Подборка '<b>{collection_name}</b>' успешно создана!",
-        reply_markup=get_collections_keyboard(),
+        reply_markup=get_collections_keyboard(user_id),
         parse_mode='HTML'
     )
     context.user_data['waiting_for_collection_name'] = False
@@ -1095,7 +1139,7 @@ async def show_user_collections(update: Update, context: ContextTypes.DEFAULT_TY
     if not collections:
         await update.message.reply_text(
             "📭 У вас пока нет подборок.\n\nСоздайте первую подборку!",
-            reply_markup=get_collections_keyboard()
+            reply_markup=get_collections_keyboard(user_id)
         )
         return
 
@@ -1106,9 +1150,113 @@ async def show_user_collections(update: Update, context: ContextTypes.DEFAULT_TY
 
     await update.message.reply_text(
         message,
-        reply_markup=get_collections_keyboard(),
+        reply_markup=get_collections_keyboard(user_id),
         parse_mode='HTML'
     )
+
+
+async def show_collection_movies(update: Update, context: ContextTypes.DEFAULT_TYPE, collection_id=None):
+    """Показывает фильмы в подборке"""
+    user_id = update.effective_user.id
+
+    if not collection_id:
+        # Получаем collection_id из текста сообщения
+        text = update.message.text
+        collections = get_user_collections(user_id)
+
+        # Ищем подборку по названию (убираем эмодзи и количество фильмов)
+        collection_name = text.replace("📁 ", "").split(" (")[0]
+
+        for cid, collection_data in collections.items():
+            if collection_data['name'] == collection_name:
+                collection_id = cid
+                break
+
+    if not collection_id:
+        await update.message.reply_text("❌ Подборка не найдена.", reply_markup=get_collections_keyboard(user_id))
+        return
+
+    collections = get_user_collections(user_id)
+    collection_data = collections.get(collection_id)
+
+    if not collection_data:
+        await update.message.reply_text("❌ Подборка не найдена.", reply_markup=get_collections_keyboard(user_id))
+        return
+
+    movies = collection_data['movies']
+
+    if not movies:
+        await update.message.reply_text(
+            f"📭 Подборка '<b>{collection_data['name']}</b>' пуста.\n\nДобавьте фильмы в подборку через меню действий фильма.",
+            reply_markup=get_collections_keyboard(user_id),
+            parse_mode='HTML'
+        )
+        return
+
+    # Сохраняем в context для навигации
+    context.user_data['current_collection'] = movies
+    context.user_data['current_collection_index'] = 0
+    context.user_data['current_collection_id'] = collection_id
+    context.user_data['current_search_type'] = 'collection'
+
+    # Показываем первый фильм
+    await show_collection_movie(update, context, 0)
+
+
+async def show_collection_movie(update: Update, context: ContextTypes.DEFAULT_TYPE, index=0):
+    """Показывает один фильм из подборки"""
+    user_id = update.effective_user.id
+    collection_movies = context.user_data.get('current_collection', [])
+    collection_id = context.user_data.get('current_collection_id')
+
+    if not collection_movies or index >= len(collection_movies):
+        message_text = "❌ Ошибка отображения подборки"
+        await update.message.reply_text(message_text, reply_markup=get_collections_keyboard(user_id))
+        return
+
+    content_data = collection_movies[index]
+    context.user_data['current_collection_index'] = index
+
+    try:
+        content_id = content_data.get('id')
+        if content_id:
+            response = requests.get(
+                f"https://api.kinopoisk.dev/v1.4/movie/{content_id}",
+                headers={"X-API-KEY": KINOPOISK_API_KEY},
+                timeout=10
+            )
+
+            if response.status_code == 200:
+                content = response.json()
+                is_series = content.get('type') == 'tv-series'
+
+                # Отправляем с навигацией
+                navigation_data = (index, len(collection_movies), "collection", collection_id)
+                await send_content(update, content, user_id, is_series, navigation_data)
+                return
+
+    except Exception as e:
+        logger.error(f"Error loading collection movie: {e}")
+
+    # Если не удалось загрузить полную информацию, показываем базовую
+    content_type = "сериал" if content_data.get('type') == 'tv-series' else "фильм"
+    genres = get_genres(content_data)
+    message = f"<b>🎬 {content_data.get('name', 'Неизвестно')}</b> ({content_data.get('year', 'Неизвестно')}) - {content_type}\n🏷️ <b>Жанр:</b> {genres}"
+
+    keyboard = get_collection_movies_keyboard(collection_id, index, len(collection_movies), content_data.get('id'))
+
+    if hasattr(update, 'callback_query') and update.callback_query:
+        await update.callback_query.edit_message_text(
+            message,
+            reply_markup=keyboard,
+            parse_mode='HTML'
+        )
+    else:
+        await update.message.reply_text(
+            message,
+            reply_markup=keyboard,
+            parse_mode='HTML'
+        )
 
 
 async def show_favorites(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1156,7 +1304,7 @@ async def show_favorites_item(update: Update, context: ContextTypes.DEFAULT_TYPE
                 is_series = content.get('type') == 'tv-series'
 
                 # Отправляем с навигацией
-                navigation_data = (index, len(favorites), "favorites")
+                navigation_data = (index, len(favorites), "favorites", None)
                 await send_content(update, content, user_id, is_series, navigation_data)
                 return
 
@@ -1222,7 +1370,7 @@ async def show_watchlist_item(update: Update, context: ContextTypes.DEFAULT_TYPE
                 is_series = content.get('type') == 'tv-series'
 
                 # Отправляем с навигацией
-                navigation_data = (index, len(watchlist), "watchlist")
+                navigation_data = (index, len(watchlist), "watchlist", None)
                 await send_content(update, content, user_id, is_series, navigation_data)
                 return
 
@@ -1261,6 +1409,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
+    user_id = update.effective_user.id
 
     if text == "🎬 Поиск фильмов и сериалов":
         await update.message.reply_text(
@@ -1298,6 +1447,10 @@ async def handle_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif text == "📋 Мои подборки":
         await show_user_collections(update, context)
+
+    elif text.startswith("📁 "):
+        # Обработка нажатия на конкретную подборку
+        await show_collection_movies(update, context)
 
 
 async def handle_list_management(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1350,14 +1503,54 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = query.from_user.id
     data = query.data
 
-    # Обработка добавления в подборку
+    # Обработка добавления в подборку - ПЕРВЫЙ ВАРИАНТ (выбор подборки)
     if data.startswith('add_to_collection_'):
+        # Показ выбора подборок
+        movie_id = data.split('_')[3]
+        collections = get_user_collections(user_id)
+
+        if not collections:
+            if query.message.caption:
+                await query.edit_message_caption(
+                    caption=query.message.caption + "\n\n📭 У вас нет подборок. Создайте первую подборку!",
+                    parse_mode='HTML'
+                )
+            else:
+                await query.edit_message_text(
+                    query.message.text + "\n\n📭 У вас нет подборок. Создайте первую подборку!",
+                    parse_mode='HTML'
+                )
+            return
+
+        keyboard = get_collections_choice_keyboard(user_id, movie_id)
+
+        # Создаем сообщение с выбором подборки
+        message_text = "📚 Выберите подборку для добавления фильма:"
+
+        if query.message.caption:
+            # Если сообщение с фото, создаем новое текстовое сообщение
+            await query.edit_message_caption(
+                caption=query.message.caption + f"\n\n{message_text}",
+                reply_markup=keyboard,
+                parse_mode='HTML'
+            )
+        else:
+            # Если текстовое сообщение, редактируем его
+            await query.edit_message_text(
+                query.message.text + f"\n\n{message_text}",
+                reply_markup=keyboard,
+                parse_mode='HTML'
+            )
+        return
+
+    # Обработка добавления в конкретную подборку - ВТОРОЙ ВАРИАНТ
+    elif data.startswith('add_collection_'):
         parts = data.split('_')
 
         if len(parts) == 4:
             # Выбор подборки для добавления
-            collection_id = parts[3]
-            movie_id = parts[4]
+            collection_id = parts[2]
+            movie_id = parts[3]
 
             try:
                 response = requests.get(
@@ -1377,48 +1570,210 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         'genres': content.get('genres', [])
                     }
 
+                    collections = get_user_collections(user_id)
+                    collection_name = collections.get(collection_id, {}).get('name', 'Неизвестно')
+
                     if add_to_collection(user_id, collection_id, content_data):
+                        success_msg = f"\n\n✅ Добавлено в подборку '{collection_name}'!"
+                    else:
+                        success_msg = f"\n\n⚠️ Этот фильм уже есть в подборке '{collection_name}'!"
+
+                    # Обновляем сообщение с исходной клавиатурой
+                    is_series = content.get('type') == 'tv-series'
+
+                    # Определяем контекст для восстановления правильной клавиатуры
+                    search_type = context.user_data.get('current_search_type', 'search')
+                    current_index = 0
+                    total_items = 1
+
+                    if search_type == 'search':
+                        current_index = context.user_data.get('search_index', 0)
+                        search_results = context.user_data.get('search_results', [])
+                        total_items = len(search_results)
+                        new_keyboard = get_search_navigation_keyboard(current_index, total_items, movie_id, user_id,
+                                                                      is_series, "search")
+                    elif search_type == 'actor':
+                        current_index = context.user_data.get('actor_index', 0)
+                        actor_results = context.user_data.get('actor_results', [])
+                        total_items = len(actor_results)
+                        new_keyboard = get_search_navigation_keyboard(current_index, total_items, movie_id, user_id,
+                                                                      is_series, "actor")
+                    elif search_type == 'filter':
+                        current_index = context.user_data.get('filter_index', 0)
+                        filter_results = context.user_data.get('filter_results', [])
+                        total_items = len(filter_results)
+                        new_keyboard = get_search_navigation_keyboard(current_index, total_items, movie_id, user_id,
+                                                                      is_series, "filter")
+                    elif search_type == 'favorites':
+                        current_index = context.user_data.get('current_favorites_index', 0)
+                        favorites = context.user_data.get('current_favorites', [])
+                        total_items = len(favorites)
+                        new_keyboard = get_list_navigation_keyboard(current_index, total_items, "favorites", movie_id)
+                    elif search_type == 'watchlist':
+                        current_index = context.user_data.get('current_watchlist_index', 0)
+                        watchlist = context.user_data.get('current_watchlist', [])
+                        total_items = len(watchlist)
+                        new_keyboard = get_list_navigation_keyboard(current_index, total_items, "watchlist", movie_id)
+                    elif search_type == 'random_movie':
+                        current_index = context.user_data.get('random_movie_index', 0)
+                        random_movies = context.user_data.get('random_movies', [])
+                        total_items = len(random_movies)
+                        new_keyboard = get_random_navigation_keyboard(current_index, total_items, movie_id, user_id,
+                                                                      is_series, "movie")
+                    elif search_type == 'random_series':
+                        current_index = context.user_data.get('random_series_index', 0)
+                        random_series_list = context.user_data.get('random_series', [])
+                        total_items = len(random_series_list)
+                        new_keyboard = get_random_navigation_keyboard(current_index, total_items, movie_id, user_id,
+                                                                      is_series, "series")
+                    elif search_type == 'collection':
+                        current_index = context.user_data.get('current_collection_index', 0)
+                        collection_movies = context.user_data.get('current_collection', [])
+                        total_items = len(collection_movies)
+                        collection_id_ctx = context.user_data.get('current_collection_id')
+                        new_keyboard = get_collection_movies_keyboard(collection_id_ctx, current_index, total_items,
+                                                                      movie_id)
+                    else:
+                        new_keyboard = get_movie_actions_keyboard(movie_id, user_id, is_series)
+
+                    if query.message.caption:
+                        # Восстанавливаем оригинальную подпись без текста о выборе подборки
+                        original_caption = query.message.caption.split('\n\n📚 Выберите подборку')[0]
+                        new_caption = original_caption + success_msg
+                        await query.edit_message_caption(
+                            caption=new_caption,
+                            reply_markup=new_keyboard,
+                            parse_mode='HTML'
+                        )
+                    else:
+                        # Восстанавливаем оригинальный текст без текста о выборе подборки
+                        original_text = query.message.text.split('\n\n📚 Выберите подборку')[0]
+                        new_text = original_text + success_msg
                         await query.edit_message_text(
-                            f"✅ Фильм добавлен в подборку!",
-                            reply_markup=get_back_keyboard()
+                            new_text,
+                            reply_markup=new_keyboard,
+                            parse_mode='HTML'
+                        )
+                else:
+                    if query.message.caption:
+                        await query.edit_message_caption(
+                            caption=query.message.caption + "\n\n❌ Ошибка при добавлении в подборку.",
+                            parse_mode='HTML'
                         )
                     else:
                         await query.edit_message_text(
-                            f"⚠️ Этот фильм уже есть в подборке!",
-                            reply_markup=get_back_keyboard()
+                            query.message.text + "\n\n❌ Ошибка при добавлении в подборку.",
+                            parse_mode='HTML'
                         )
-                else:
-                    await query.edit_message_text("❌ Ошибка при добавлении в подборку.")
 
             except Exception as e:
                 logger.error(f"Error adding to collection: {e}")
-                await query.edit_message_text("❌ Ошибка при добавлении в подборку.")
-
-        elif len(parts) == 3:
-            # Показ выбора подборок
-            movie_id = parts[3]
-            collections = get_user_collections(user_id)
-
-            if not collections:
-                await query.edit_message_text(
-                    "📭 У вас нет подборок. Создайте первую подборку!",
-                    reply_markup=get_back_keyboard()
-                )
-                return
-
-            keyboard = get_collections_choice_keyboard(user_id, movie_id)
-            await query.edit_message_text(
-                "📚 Выберите подборку для добавления фильма:",
-                reply_markup=keyboard
-            )
+                if query.message.caption:
+                    await query.edit_message_caption(
+                        caption=query.message.caption + "\n\n❌ Ошибка при добавлении в подборку.",
+                        parse_mode='HTML'
+                    )
+                else:
+                    await query.edit_message_text(
+                        query.message.text + "\n\n❌ Ошибка при добавлении в подборку.",
+                        parse_mode='HTML'
+                    )
         return
 
     # Обработка отмены выбора подборки
     elif data == "cancel_collection":
-        await query.edit_message_text(
-            "❌ Добавление в подборку отменено.",
-            reply_markup=get_back_keyboard()
-        )
+        # Восстанавливаем оригинальное сообщение с фильмом
+        try:
+            # Получаем movie_id из предыдущего состояния
+            movie_id = None
+            if 'current_search_type' in context.user_data:
+                search_type = context.user_data['current_search_type']
+                if search_type == 'search':
+                    current_index = context.user_data.get('search_index', 0)
+                    search_results = context.user_data.get('search_results', [])
+                    if search_results and current_index < len(search_results):
+                        movie_id = search_results[current_index].get('id')
+                # Аналогично для других типов поиска...
+
+            if movie_id:
+                # Загружаем информацию о фильме и показываем с оригинальной клавиатурой
+                response = requests.get(
+                    f"https://api.kinopoisk.dev/v1.4/movie/{movie_id}",
+                    headers={"X-API-KEY": KINOPOISK_API_KEY},
+                    timeout=10
+                )
+
+                if response.status_code == 200:
+                    content = response.json()
+                    is_series = content.get('type') == 'tv-series'
+                    new_keyboard = get_movie_actions_keyboard(movie_id, user_id, is_series)
+
+                    if query.message.caption:
+                        # Восстанавливаем оригинальную подпись
+                        original_caption = query.message.caption.split('\n\n📚 Выберите подборку')[0]
+                        await query.edit_message_caption(
+                            caption=original_caption,
+                            reply_markup=new_keyboard,
+                            parse_mode='HTML'
+                        )
+                    else:
+                        # Восстанавливаем оригинальный текст
+                        original_text = query.message.text.split('\n\n📚 Выберите подборку')[0]
+                        await query.edit_message_text(
+                            original_text,
+                            reply_markup=new_keyboard,
+                            parse_mode='HTML'
+                        )
+                else:
+                    await query.edit_message_text(
+                        "❌ Добавление в подборку отменено.",
+                        reply_markup=get_back_keyboard()
+                    )
+            else:
+                await query.edit_message_text(
+                    "❌ Добавление в подборку отменено.",
+                    reply_markup=get_back_keyboard()
+                )
+        except Exception as e:
+            logger.error(f"Error canceling collection: {e}")
+            await query.edit_message_text(
+                "❌ Добавление в подборку отменено.",
+                reply_markup=get_back_keyboard()
+            )
+        return
+
+    # ... остальной код обработчика button_handler остается без изменений ...
+
+    # Обработка навигации по подборкам
+    elif data.startswith('nav_collection_'):
+        parts = data.split('_')
+        collection_id = parts[2]
+        new_index = int(parts[3])
+        context.user_data['current_collection_id'] = collection_id
+        await show_collection_movie(update, context, new_index)
+        return
+
+    # Обработка удаления из подборки
+    elif data.startswith('remove_from_collection_'):
+        parts = data.split('_')
+        collection_id = parts[3]
+        movie_id = parts[4]
+
+        if remove_from_collection(user_id, collection_id, movie_id):
+            # Обновляем список фильмов в контексте
+            collection_movies = context.user_data.get('current_collection', [])
+            context.user_data['current_collection'] = [m for m in collection_movies if
+                                                       str(m.get('id')) != str(movie_id)]
+            current_index = context.user_data.get('current_collection_index', 0)
+
+            if not context.user_data['current_collection']:
+                await query.edit_message_text("📭 Подборка пуста!", reply_markup=get_collections_keyboard(user_id))
+                return
+
+            if current_index >= len(context.user_data['current_collection']):
+                current_index = len(context.user_data['current_collection']) - 1
+
+            await show_collection_movie(update, context, current_index)
         return
 
     # Обработка навигации по случайным фильмам
@@ -1516,7 +1871,16 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
         if response.status_code != 200:
-            await query.edit_message_text("❌ Ошибка.")
+            if query.message.caption:
+                await query.edit_message_caption(
+                    caption=query.message.caption + "\n\n❌ Ошибка.",
+                    parse_mode='HTML'
+                )
+            else:
+                await query.edit_message_text(
+                    query.message.text + "\n\n❌ Ошибка.",
+                    parse_mode='HTML'
+                )
             return
 
         content = response.json()
@@ -1604,6 +1968,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             total_items = len(random_series_list)
             new_keyboard = get_random_navigation_keyboard(current_index, total_items, movie_id, user_id, is_series,
                                                           "series")
+        elif search_type == 'collection':
+            current_index = context.user_data.get('current_collection_index', 0)
+            collection_movies = context.user_data.get('current_collection', [])
+            total_items = len(collection_movies)
+            collection_id = context.user_data.get('current_collection_id')
+            new_keyboard = get_collection_movies_keyboard(collection_id, current_index, total_items, movie_id)
         else:
             new_keyboard = get_movie_actions_keyboard(movie_id, user_id, is_series)
 
@@ -1624,7 +1994,16 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     except Exception as e:
         logger.error(f"Button handler error: {e}")
-        await query.edit_message_text("❌ Ошибка.")
+        if query.message.caption:
+            await query.edit_message_caption(
+                caption=query.message.caption + "\n\n❌ Ошибка.",
+                parse_mode='HTML'
+            )
+        else:
+            await query.edit_message_text(
+                query.message.text + "\n\n❌ Ошибка.",
+                parse_mode='HTML'
+            )
 
 
 def main():
@@ -1638,12 +2017,16 @@ def main():
 
     application.add_handler(CommandHandler("start", start))
 
+    # Основные кнопки меню
     application.add_handler(MessageHandler(filters.Text([
         "🎬 Поиск фильмов и сериалов", "🔍 Поиск по актерам", "🎭 Фильтр по жанру/году",
         "⭐ Избранное", "🎯 Хочу посмотреть", "📚 Мои подборки",
         "🎲 Случайный фильм", "📺 Случайный сериал", "⬅️ Назад в меню",
         "➕ Создать подборку", "📋 Мои подборки"
     ]), handle_main_menu))
+
+    # Обработка нажатия на подборки (кнопки начинающиеся с "📁 ")
+    application.add_handler(MessageHandler(filters.Regex(r"^📁 .*"), handle_main_menu))
 
     application.add_handler(MessageHandler(filters.Text([
         "🗑 Очистить избранное", "🗑 Очистить желаемое"
