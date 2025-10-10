@@ -9,11 +9,3 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-
-volumes:
-  bot-data:
-  pgadmin-data:
-
-networks:
-  postgres:
-    driver: bridge
