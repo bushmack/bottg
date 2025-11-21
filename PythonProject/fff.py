@@ -9,7 +9,7 @@ import requests
 
 # Конфигурация
 KINOPOISK_API_KEY = "WE5F7TA-CBS4MEF-MBENDVR-Z31P1H5"
-BOT_TOKEN = "7981463799:AAHxvci7hCtrq_Zm1pfpYHNmJFgrIrVe9r8"
+BOT_TOKEN = "8056982952:AAHOXONwpFsiWdmIZ4CAXbZsSTGCLjp-CmE"
 
 # Файлы для хранения данных
 FAVORITES_FILE = "favorites.json"
@@ -31,14 +31,17 @@ def load_data(filename):
                 content = f.read().strip()
                 if not content:
                     return {}
-                return json.loads(content)
+                data = json.loads(content)
+                # Убедимся, что данные имеют правильный формат
+                if not isinstance(data, dict):
+                    return {}
+                return data
         return {}
     except (json.JSONDecodeError, Exception) as e:
         logger.error(f"Error loading {filename}: {e}")
         with open(filename, 'w', encoding='utf-8') as f:
             json.dump({}, f, ensure_ascii=False, indent=2)
         return {}
-
 
 def save_data(filename, data):
     """Сохраняет данные в файл"""
@@ -156,7 +159,7 @@ def remove_from_collection(user_id, collection_id, movie_id):
 def get_main_keyboard():
     keyboard = [
         [KeyboardButton("🎬 Поиск фильмов и сериалов")],
-        [KeyboardButton("🔍 Поиск по актерам"), KeyboardButton("🎭 Фильтр по жанру/году")],
+        [KeyboardButton("🎭 Фильтр по жанру/году")],
         [KeyboardButton("⭐ Избранное"), KeyboardButton("🎯 Хочу посмотреть")],
         [KeyboardButton("📚 Мои подборки"), KeyboardButton("🎲 Случайный фильм")],
         [KeyboardButton("📺 Случайный сериал")]
@@ -170,6 +173,19 @@ def get_back_keyboard():
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
+
+async def filter_by_genre_year(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Фильтр по жанру и году"""
+    await update.message.reply_text(
+        "🎭 Введите параметры поиска в формате:\n\n"
+        "• <b>Жанр год</b> - например: <code>комедия 2010</code>\n"
+        "• <b>Жанр год-год</b> - например: <code>фантастика 2010-2020</code>\n"
+        "• <b>Жанр</b> - например: <code>драма</code>\n\n"
+        "Доступные жанры: комедия, драма, боевик, фантастика, ужасы, триллер, мелодрама, детектив, приключения, аниме",
+        reply_markup=get_back_keyboard(),
+        parse_mode='HTML'
+    )
+    context.user_data['waiting_for_filter'] = True
 
 def get_collections_keyboard(user_id=None):
     """Клавиатура для управления подборками"""
@@ -329,7 +345,6 @@ def get_search_navigation_keyboard(current_index, total_items, current_movie_id,
 
     return InlineKeyboardMarkup(keyboard)
 
-
 def get_random_navigation_keyboard(current_index, total_items, current_movie_id, user_id, is_series=False,
                                    content_type="movie"):
     """Создает клавиатуру для навигации по случайным фильмам/сериалам"""
@@ -444,13 +459,27 @@ def get_genres(content):
     if not content:
         return "Неизвестно"
 
-    genres = content.get('genres', [])
-    if not genres:
+    try:
+        genres = content.get('genres', [])
+        if not genres or genres is None:
+            return "Неизвестно"
+
+        # Если genres это строка, возвращаем как есть
+        if isinstance(genres, str):
+            return genres
+
+        # Если genres это список, извлекаем названия
+        genre_names = []
+        for genre in genres:
+            if isinstance(genre, dict) and genre.get('name'):
+                genre_names.append(genre['name'])
+            elif isinstance(genre, str):
+                genre_names.append(genre)
+
+        return ", ".join(genre_names) if genre_names else "Неизвестно"
+    except Exception as e:
+        logger.error(f"Error getting genres: {e}")
         return "Неизвестно"
-
-    genre_names = [genre.get('name', '') for genre in genres if genre.get('name')]
-    return ", ".join(genre_names) if genre_names else "Неизвестно"
-
 
 async def get_quality_random_movie():
     """Ищет случайный фильм ТОЛЬКО с 1998 года с постером и описанием"""
@@ -522,7 +551,8 @@ async def get_truly_random_series():
     return None
 
 
-async def send_content(update, content, user_id, is_series=False, navigation_data=None, search_type="search"):
+async def send_content(update, content, user_id, is_series=False, navigation_data=None, search_type="search",
+                       has_previous_photo=False):
     """Отправляет фильм/сериал с постером и описанием"""
     if not content:
         if hasattr(update, 'callback_query') and update.callback_query:
@@ -587,7 +617,52 @@ async def send_content(update, content, user_id, is_series=False, navigation_dat
     # Определяем тип update
     if hasattr(update, 'callback_query') and update.callback_query:
         # Это callback query (навигация по спискам)
-        if poster_url and poster_url.startswith('http'):
+        current_has_photo = update.callback_query.message.photo is not None
+        next_has_photo = poster_url and poster_url.startswith('http')
+
+        # Если текущее сообщение с фото, а следующее без фото - удаляем фото и отправляем текст
+        if current_has_photo and not next_has_photo:
+            try:
+                await update.callback_query.message.delete()
+                await update.callback_query.message.reply_text(
+                    message,
+                    reply_markup=keyboard,
+                    parse_mode='HTML'
+                )
+                return
+            except Exception as e:
+                logger.error(f"Error deleting photo message: {e}")
+                # Если не удалось удалить, редактируем в текст
+                await update.callback_query.edit_message_text(
+                    message,
+                    reply_markup=keyboard,
+                    parse_mode='HTML'
+                )
+                return
+
+        # Если текущее сообщение без фото, а следующее с фото - отправляем новое фото сообщение
+        elif not current_has_photo and next_has_photo:
+            try:
+                await update.callback_query.message.delete()
+                await update.callback_query.message.reply_photo(
+                    photo=poster_url,
+                    caption=message,
+                    reply_markup=keyboard,
+                    parse_mode='HTML'
+                )
+                return
+            except Exception as e:
+                logger.error(f"Error sending new photo: {e}")
+                # Если не удалось, оставляем текстовое
+                await update.callback_query.edit_message_text(
+                    message,
+                    reply_markup=keyboard,
+                    parse_mode='HTML'
+                )
+                return
+
+        # Оба сообщения с фото или оба без фото - редактируем как есть
+        if next_has_photo:
             try:
                 await update.callback_query.edit_message_media(
                     media=InputMediaPhoto(media=poster_url, caption=message, parse_mode='HTML'),
@@ -843,7 +918,15 @@ async def show_search_result(update: Update, context: ContextTypes.DEFAULT_TYPE,
 
     # Отправляем с навигацией
     navigation_data = (index, len(search_results), "search", None)
-    await send_content(update, content, user_id, is_series, navigation_data, search_type="search")
+
+    # Проверяем, есть ли текущее сообщение с фото
+    has_photo = False
+    if hasattr(update, 'callback_query') and update.callback_query:
+        if update.callback_query.message.photo:
+            has_photo = True
+
+    await send_content(update, content, user_id, is_series, navigation_data, search_type="search",
+                       has_previous_photo=has_photo)
 
 
 async def search_by_actor(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -869,8 +952,7 @@ async def search_by_actor(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "page": 1,
                 "limit": 50,
                 "persons.name": actor_name,
-                "year": "1998-2024",
-                "rating.kp": "5-10",
+                "notNullFields": "name",
                 "selectFields": ["id", "name", "year", "rating", "poster", "description", "type", "persons", "genres"]
             },
             timeout=15
@@ -887,17 +969,31 @@ async def search_by_actor(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 return
 
-            # Ограничиваем максимум 5 результатами
-            movies_list = movies_list[:5]
+            # Фильтруем результаты - проверяем, что актер действительно есть в фильме
+            filtered_movies = []
+            for movie in movies_list:
+                if validate_actor_in_movie(movie, actor_name):
+                    filtered_movies.append(movie)
+
+            if not filtered_movies:
+                await update.message.reply_text(
+                    f"😔 Не найдено фильмов с участием {actor_name}.",
+                    reply_markup=get_back_keyboard()
+                )
+                return
+
+            # Ограничиваем максимум 10 результатами
+            filtered_movies = filtered_movies[:10]
 
             # Сохраняем результаты поиска
-            context.user_data['actor_results'] = movies_list
+            context.user_data['actor_results'] = filtered_movies
             context.user_data['actor_index'] = 0
             context.user_data['current_search_type'] = 'actor'
 
             # Показываем первый результат
             await show_actor_result(update, context, 0)
         else:
+            logger.error(f"Actor search API error: {response.status_code}")
             await update.message.reply_text("❌ Ошибка при поиске фильмов.", reply_markup=get_back_keyboard())
 
     except Exception as e:
@@ -923,23 +1019,41 @@ async def show_actor_result(update: Update, context: ContextTypes.DEFAULT_TYPE, 
 
     is_series = content.get('type') == 'tv-series'
 
-    # Отправляем с навигацией
-    navigation_data = (index, len(actor_results), "search", None)
+    # Отправляем с навигацией - исправлено: используем "actor" вместо "search"
+    navigation_data = (index, len(actor_results), "actor", None)
     await send_content(update, content, user_id, is_series, navigation_data, search_type="actor")
 
 
-async def filter_by_genre_year(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Фильтр по жанру и году"""
-    await update.message.reply_text(
-        "🎭 Введите параметры поиска в формате:\n\n"
-        "• <b>Жанр год</b> - например: <code>комедия 2010</code>\n"
-        "• <b>Жанр год-год</b> - например: <code>фантастика 2010-2020</code>\n"
-        "• <b>Жанр</b> - например: <code>драма</code>\n\n"
-        "Доступные жанры: комедия, драма, боевик, фантастика, ужасы, триллер, мелодрама, детектив, приключения, аниме",
-        reply_markup=get_back_keyboard(),
-        parse_mode='HTML'
-    )
-    context.user_data['waiting_for_filter'] = True
+async def handle_actor_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка ввода имени актера"""
+    if context.user_data.get('waiting_for_actor'):
+        context.args = update.message.text.split()
+        await search_by_actor(update, context)
+        context.user_data['waiting_for_actor'] = False
+
+def validate_actor_in_movie(movie, actor_name):
+    """Проверяет, что актер действительно присутствует в фильме"""
+    try:
+        persons = movie.get('persons', [])
+        if not persons:
+            return False
+
+        actor_name_lower = actor_name.lower()
+
+        for person in persons:
+            if person.get('name') and actor_name_lower in person['name'].lower():
+                # Проверяем, что это актер (не режиссер и т.д.)
+                profession = person.get('profession', '').lower()
+                en_profession = person.get('enProfession', '').lower()
+
+                if 'actor' in profession or 'актер' in profession or 'actor' in en_profession:
+                    return True
+        return False
+    except Exception as e:
+        logger.error(f"Error validating actor in movie: {e}")
+        return False
+
+
 
 
 async def handle_filter_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1211,7 +1325,10 @@ async def show_collection_movie(update: Update, context: ContextTypes.DEFAULT_TY
 
     if not collection_movies or index >= len(collection_movies):
         message_text = "❌ Ошибка отображения подборки"
-        await update.message.reply_text(message_text, reply_markup=get_collections_keyboard(user_id))
+        if hasattr(update, 'callback_query') and update.callback_query:
+            await update.callback_query.edit_message_text(message_text, reply_markup=get_collections_keyboard(user_id))
+        else:
+            await update.message.reply_text(message_text, reply_markup=get_collections_keyboard(user_id))
         return
 
     content_data = collection_movies[index]
@@ -1246,11 +1363,294 @@ async def show_collection_movie(update: Update, context: ContextTypes.DEFAULT_TY
     keyboard = get_collection_movies_keyboard(collection_id, index, len(collection_movies), content_data.get('id'))
 
     if hasattr(update, 'callback_query') and update.callback_query:
-        await update.callback_query.edit_message_text(
+        # Проверяем, есть ли фото в текущем сообщении
+        if update.callback_query.message.photo:
+            # Если есть фото, редактируем caption
+            await update.callback_query.edit_message_caption(
+                caption=message,
+                reply_markup=keyboard,
+                parse_mode='HTML'
+            )
+        else:
+            # Если нет фото, редактируем текст
+            await update.callback_query.edit_message_text(
+                message,
+                reply_markup=keyboard,
+                parse_mode='HTML'
+            )
+    else:
+        await update.message.reply_text(
             message,
             reply_markup=keyboard,
             parse_mode='HTML'
         )
+
+
+async def show_watchlist_item(update: Update, context: ContextTypes.DEFAULT_TYPE, index=0):
+    """Показывает один элемент из списка желаемого с навигацией"""
+    user_id = update.effective_user.id
+    watchlist = context.user_data.get('current_watchlist', [])
+
+    if not watchlist or index >= len(watchlist):
+        message_text = "❌ Ошибка отображения списка"
+        if hasattr(update, 'callback_query') and update.callback_query:
+            await update.callback_query.edit_message_text(message_text, reply_markup=get_back_keyboard())
+        else:
+            await update.message.reply_text(message_text, reply_markup=get_back_keyboard())
+        return
+
+    content_data = watchlist[index]
+    context.user_data['current_watchlist_index'] = index
+
+    try:
+        content_id = content_data.get('id')
+        if content_id:
+            response = requests.get(
+                f"https://api.kinopoisk.dev/v1.4/movie/{content_id}",
+                headers={"X-API-KEY": KINOPOISK_API_KEY},
+                timeout=10
+            )
+
+            if response.status_code == 200:
+                content = response.json()
+                is_series = content.get('type') == 'tv-series'
+
+                # Отправляем с навигацией
+                navigation_data = (index, len(watchlist), "watchlist", None)
+                await send_content(update, content, user_id, is_series, navigation_data)
+                return
+
+    except Exception as e:
+        logger.error(f"Error loading watchlist item: {e}")
+
+    # Если не удалось загрузить полную информацию, показываем базовую
+    content_type = "сериал" if content_data.get('type') == 'tv-series' else "фильм"
+    genres = get_genres(content_data)
+    message = f"<b>🎬 {content_data.get('name', 'Неизвестно')}</b> ({content_data.get('year', 'Неизвестно')}) - {content_type}\n🏷️ <b>Жанр:</b> {genres}"
+
+    keyboard = get_list_navigation_keyboard(index, len(watchlist), "watchlist", content_data.get('id'))
+
+    if hasattr(update, 'callback_query') and update.callback_query:
+        # Проверяем, есть ли фото в текущем сообщении
+        if update.callback_query.message.photo:
+            # Если есть фото, редактируем caption
+            await update.callback_query.edit_message_caption(
+                caption=message,
+                reply_markup=keyboard,
+                parse_mode='HTML'
+            )
+        else:
+            # Если нет фото, редактируем текст
+            await update.callback_query.edit_message_text(
+                message,
+                reply_markup=keyboard,
+                parse_mode='HTML'
+            )
+    else:
+        await update.message.reply_text(
+            message,
+            reply_markup=keyboard,
+            parse_mode='HTML'
+        )
+
+
+async def show_collection_movie(update: Update, context: ContextTypes.DEFAULT_TYPE, index=0):
+    """Показывает один фильм из подборки"""
+    user_id = update.effective_user.id
+    collection_movies = context.user_data.get('current_collection', [])
+    collection_id = context.user_data.get('current_collection_id')
+
+    if not collection_movies or index >= len(collection_movies):
+        message_text = "❌ Ошибка отображения подборки"
+        if hasattr(update, 'callback_query') and update.callback_query:
+            await update.callback_query.edit_message_text(message_text, reply_markup=get_collections_keyboard(user_id))
+        else:
+            await update.message.reply_text(message_text, reply_markup=get_collections_keyboard(user_id))
+        return
+
+    content_data = collection_movies[index]
+    context.user_data['current_collection_index'] = index
+
+    try:
+        content_id = content_data.get('id')
+        if content_id:
+            response = requests.get(
+                f"https://api.kinopoisk.dev/v1.4/movie/{content_id}",
+                headers={"X-API-KEY": KINOPOISK_API_KEY},
+                timeout=10
+            )
+
+            if response.status_code == 200:
+                content = response.json()
+                is_series = content.get('type') == 'tv-series'
+
+                # Отправляем с навигацией
+                navigation_data = (index, len(collection_movies), "collection", collection_id)
+                await send_content(update, content, user_id, is_series, navigation_data)
+                return
+
+    except Exception as e:
+        logger.error(f"Error loading collection movie: {e}")
+
+    # Если не удалось загрузить полную информацию, показываем базовую
+    content_type = "сериал" if content_data.get('type') == 'tv-series' else "фильм"
+    genres = get_genres(content_data)
+    message = f"<b>🎬 {content_data.get('name', 'Неизвестно')}</b> ({content_data.get('year', 'Неизвестно')}) - {content_type}\n🏷️ <b>Жанр:</b> {genres}"
+
+    keyboard = get_collection_movies_keyboard(collection_id, index, len(collection_movies), content_data.get('id'))
+
+    if hasattr(update, 'callback_query') and update.callback_query:
+        # Проверяем, есть ли фото в текущем сообщении
+        if update.callback_query.message.photo:
+            # Если есть фото, редактируем caption
+            await update.callback_query.edit_message_caption(
+                caption=message,
+                reply_markup=keyboard,
+                parse_mode='HTML'
+            )
+        else:
+            # Если нет фото, редактируем текст
+            await update.callback_query.edit_message_text(
+                message,
+                reply_markup=keyboard,
+                parse_mode='HTML'
+            )
+    else:
+        await update.message.reply_text(
+            message,
+            reply_markup=keyboard,
+            parse_mode='HTML'
+        )
+
+
+async def show_watchlist_item(update: Update, context: ContextTypes.DEFAULT_TYPE, index=0):
+    """Показывает один элемент из списка желаемого с навигацией"""
+    user_id = update.effective_user.id
+    watchlist = context.user_data.get('current_watchlist', [])
+
+    if not watchlist or index >= len(watchlist):
+        message_text = "❌ Ошибка отображения списка"
+        if hasattr(update, 'callback_query') and update.callback_query:
+            await update.callback_query.edit_message_text(message_text, reply_markup=get_back_keyboard())
+        else:
+            await update.message.reply_text(message_text, reply_markup=get_back_keyboard())
+        return
+
+    content_data = watchlist[index]
+    context.user_data['current_watchlist_index'] = index
+
+    try:
+        content_id = content_data.get('id')
+        if content_id:
+            response = requests.get(
+                f"https://api.kinopoisk.dev/v1.4/movie/{content_id}",
+                headers={"X-API-KEY": KINOPOISK_API_KEY},
+                timeout=10
+            )
+
+            if response.status_code == 200:
+                content = response.json()
+                is_series = content.get('type') == 'tv-series'
+
+                # Отправляем с навигацией
+                navigation_data = (index, len(watchlist), "watchlist", None)
+                await send_content(update, content, user_id, is_series, navigation_data)
+                return
+
+    except Exception as e:
+        logger.error(f"Error loading watchlist item: {e}")
+
+    # Если не удалось загрузить полную информацию, показываем базовую
+    content_type = "сериал" if content_data.get('type') == 'tv-series' else "фильм"
+    genres = get_genres(content_data)
+    message = f"<b>🎬 {content_data.get('name', 'Неизвестно')}</b> ({content_data.get('year', 'Неизвестно')}) - {content_type}\n🏷️ <b>Жанр:</b> {genres}"
+
+    keyboard = get_list_navigation_keyboard(index, len(watchlist), "watchlist", content_data.get('id'))
+
+    if hasattr(update, 'callback_query') and update.callback_query:
+        # Проверяем, есть ли фото в текущем сообщении
+        if update.callback_query.message.photo:
+            # Если есть фото, редактируем caption
+            await update.callback_query.edit_message_caption(
+                caption=message,
+                reply_markup=keyboard,
+                parse_mode='HTML'
+            )
+        else:
+            # Если нет фото, редактируем текст
+            await update.callback_query.edit_message_text(
+                message,
+                reply_markup=keyboard,
+                parse_mode='HTML'
+            )
+    else:
+        await update.message.reply_text(
+            message,
+            reply_markup=keyboard,
+            parse_mode='HTML'
+        )
+
+
+async def show_favorites_item(update: Update, context: ContextTypes.DEFAULT_TYPE, index=0):
+    """Показывает один элемент из избранного с навигацией"""
+    user_id = update.effective_user.id
+    favorites = context.user_data.get('current_favorites', [])
+
+    if not favorites or index >= len(favorites):
+        message_text = "❌ Ошибка отображения списка"
+        if hasattr(update, 'callback_query') and update.callback_query:
+            await update.callback_query.edit_message_text(message_text, reply_markup=get_back_keyboard())
+        else:
+            await update.message.reply_text(message_text, reply_markup=get_back_keyboard())
+        return
+
+    content_data = favorites[index]
+    context.user_data['current_favorites_index'] = index
+
+    try:
+        content_id = content_data.get('id')
+        if content_id:
+            response = requests.get(
+                f"https://api.kinopoisk.dev/v1.4/movie/{content_id}",
+                headers={"X-API-KEY": KINOPOISK_API_KEY},
+                timeout=10
+            )
+
+            if response.status_code == 200:
+                content = response.json()
+                is_series = content.get('type') == 'tv-series'
+
+                # Отправляем с навигацией
+                navigation_data = (index, len(favorites), "favorites", None)
+                await send_content(update, content, user_id, is_series, navigation_data)
+                return
+
+    except Exception as e:
+        logger.error(f"Error loading favorite: {e}")
+
+    # Если не удалось загрузить полную информацию, показываем базовую
+    content_type = "сериал" if content_data.get('type') == 'tv-series' else "фильм"
+    genres = get_genres(content_data)
+    message = f"<b>🎬 {content_data.get('name', 'Неизвестно')}</b> ({content_data.get('year', 'Неизвестно')}) - {content_type}\n🏷️ <b>Жанр:</b> {genres}"
+
+    keyboard = get_list_navigation_keyboard(index, len(favorites), "favorites", content_data.get('id'))
+
+    if hasattr(update, 'callback_query') and update.callback_query:
+        # Проверяем, есть ли фото в текущем сообщении
+        if update.callback_query.message.photo:
+            # Если есть фото, редактируем caption
+            await update.callback_query.edit_message_caption(
+                caption=message,
+                reply_markup=keyboard,
+                parse_mode='HTML'
+            )
+        else:
+            # Если нет фото, редактируем текст
+            await update.callback_query.edit_message_text(
+                message,
+                reply_markup=keyboard,
+                parse_mode='HTML'
+            )
     else:
         await update.message.reply_text(
             message,
@@ -1350,7 +1750,10 @@ async def show_watchlist_item(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     if not watchlist or index >= len(watchlist):
         message_text = "❌ Ошибка отображения списка"
-        await update.message.reply_text(message_text, reply_markup=get_back_keyboard())
+        if hasattr(update, 'callback_query') and update.callback_query:
+            await update.callback_query.edit_message_text(message_text, reply_markup=get_back_keyboard())
+        else:
+            await update.message.reply_text(message_text, reply_markup=get_back_keyboard())
         return
 
     content_data = watchlist[index]
@@ -1384,11 +1787,76 @@ async def show_watchlist_item(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     keyboard = get_list_navigation_keyboard(index, len(watchlist), "watchlist", content_data.get('id'))
 
-    await update.message.reply_text(
-        message,
-        reply_markup=keyboard,
-        parse_mode='HTML'
-    )
+    if hasattr(update, 'callback_query') and update.callback_query:
+        await update.callback_query.edit_message_text(
+            message,
+            reply_markup=keyboard,
+            parse_mode='HTML'
+        )
+    else:
+        await update.message.reply_text(
+            message,
+            reply_markup=keyboard,
+            parse_mode='HTML'
+        )
+
+
+async def show_favorites_item(update: Update, context: ContextTypes.DEFAULT_TYPE, index=0):
+    """Показывает один элемент из избранного с навигацией"""
+    user_id = update.effective_user.id
+    favorites = context.user_data.get('current_favorites', [])
+
+    if not favorites or index >= len(favorites):
+        message_text = "❌ Ошибка отображения списка"
+        if hasattr(update, 'callback_query') and update.callback_query:
+            await update.callback_query.edit_message_text(message_text, reply_markup=get_back_keyboard())
+        else:
+            await update.message.reply_text(message_text, reply_markup=get_back_keyboard())
+        return
+
+    content_data = favorites[index]
+    context.user_data['current_favorites_index'] = index
+
+    try:
+        content_id = content_data.get('id')
+        if content_id:
+            response = requests.get(
+                f"https://api.kinopoisk.dev/v1.4/movie/{content_id}",
+                headers={"X-API-KEY": KINOPOISK_API_KEY},
+                timeout=10
+            )
+
+            if response.status_code == 200:
+                content = response.json()
+                is_series = content.get('type') == 'tv-series'
+
+                # Отправляем с навигацией
+                navigation_data = (index, len(favorites), "favorites", None)
+                await send_content(update, content, user_id, is_series, navigation_data)
+                return
+
+    except Exception as e:
+        logger.error(f"Error loading favorite: {e}")
+
+    # Если не удалось загрузить полную информацию, показываем базовую
+    content_type = "сериал" if content_data.get('type') == 'tv-series' else "фильм"
+    genres = get_genres(content_data)
+    message = f"<b>🎬 {content_data.get('name', 'Неизвестно')}</b> ({content_data.get('year', 'Неизвестно')}) - {content_type}\n🏷️ <b>Жанр:</b> {genres}"
+
+    keyboard = get_list_navigation_keyboard(index, len(favorites), "favorites", content_data.get('id'))
+
+    if hasattr(update, 'callback_query') and update.callback_query:
+        await update.callback_query.edit_message_text(
+            message,
+            reply_markup=keyboard,
+            parse_mode='HTML'
+        )
+    else:
+        await update.message.reply_text(
+            message,
+            reply_markup=keyboard,
+            parse_mode='HTML'
+        )
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1396,7 +1864,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 🎬 Добро пожаловать в КиноБот!
 
 🎬 Поиск фильмов и сериалов - найти по названию
-🔍 Поиск по актерам - найти фильмы по актерам
 🎭 Фильтр по жанру/году - поиск по жанру и году
 ⭐ Избранное - ваши любимые фильмы и сериалы  
 🎯 Хочу посмотреть - фильмы и сериалы для просмотра
@@ -1418,8 +1885,7 @@ async def handle_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         context.user_data['waiting_for_search'] = True
 
-    elif text == "🔍 Поиск по актерам":
-        await search_by_actor(update, context)
+
 
     elif text == "🎭 Фильтр по жанру/году":
         await filter_by_genre_year(update, context)
@@ -1483,15 +1949,12 @@ async def handle_search_input(update: Update, context: ContextTypes.DEFAULT_TYPE
         context.args = update.message.text.split()
         await search_content(update, context)
         context.user_data['waiting_for_search'] = False
-    elif context.user_data.get('waiting_for_actor'):
-        context.args = update.message.text.split()
-        await search_by_actor(update, context)
-        context.user_data['waiting_for_actor'] = False
     elif context.user_data.get('waiting_for_filter'):
         await handle_filter_input(update, context)
     elif context.user_data.get('waiting_for_collection_name'):
         await handle_collection_name(update, context)
     else:
+        # По умолчанию ищем по названию
         context.args = update.message.text.split()
         await search_content(update, context)
 
@@ -1499,6 +1962,8 @@ async def handle_search_input(update: Update, context: ContextTypes.DEFAULT_TYPE
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+
+
 
     user_id = query.from_user.id
     data = query.data
@@ -2019,7 +2484,7 @@ def main():
 
     # Основные кнопки меню
     application.add_handler(MessageHandler(filters.Text([
-        "🎬 Поиск фильмов и сериалов", "🔍 Поиск по актерам", "🎭 Фильтр по жанру/году",
+        "🎬 Поиск фильмов и сериалов", "🎭 Фильтр по жанру/году",
         "⭐ Избранное", "🎯 Хочу посмотреть", "📚 Мои подборки",
         "🎲 Случайный фильм", "📺 Случайный сериал", "⬅️ Назад в меню",
         "➕ Создать подборку", "📋 Мои подборки"
@@ -2034,6 +2499,11 @@ def main():
 
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_search_input))
     application.add_handler(CallbackQueryHandler(button_handler))
+
+    application.add_handler(MessageHandler(
+        filters.TEXT & ~filters.COMMAND & filters.Regex(r'.*'),
+        handle_search_input
+    ))
 
     logger.info("Бот запущен...")
     application.run_polling()
